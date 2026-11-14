@@ -1,87 +1,71 @@
-// backend/server.js
+// server.js
 const express = require('express');
 const cors = require('cors');
-const { exec } = require('child_process');
+const fs = require('fs');
 const path = require('path');
+
+const {
+  parseSecretCfg,
+  runAllAccountsScript,
+  runSingleAccountScript,
+  parseSavedAccountHtml,
+} = require('./services/scraperService');
+const {
+  detectSoldierArchetype,
+  evaluateCollectiveRaidPool,
+  recommendBestUpgrade,
+} = require('./services/strategyEngine');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// GET /api/accounts - Triggers script execution and returns parsed army data
-app.get('/api/accounts', (req, res) => {
-  // Option A: If you want to run your real bash script archive:
-  // exec('bash ./scripts/run.sh.txt', (error, stdout, stderr) => { ... });
+const CACHE_FILE = path.join(__dirname, 'data/accountsCache.json');
+const RAW_HTML_DIR = path.join(__dirname, 'data/raw_html');
 
-  // For now, returning the structured JSON that your Vue 3 frontend expects:
-  const accountsData = [
-    {
-      id: 'berbelita1',
-      name: 'berbelita1',
-      raidPhase: 4,
-      credits: 222,
-      raidCurrency: 49,
-      firstSoldier: {
-        slot: 0,
-        name: 'Mr.Reinelmes',
-        level: 8,
-        archetype: 'Mid-Range Bruiser',
-        upgradeCost: 181,
-        aiConfig: {
-          favouriteWeapon: 'Comanche Auto',
-          favouriteTarget: 'In the head!',
-          preferredVictim: 'The biggest threat',
-          fightingStyle: 'Standard',
-          priorityTarget: 'Default',
-        },
-        skills: [
-          'Comanche Auto',
-          'Browning',
-          'Bazooka',
-          'Grenade',
-          'Pilot',
-          'Saboteur',
-          'Sprint',
-          'Dodge',
-          'Anatomy',
-          'Hard Boiled',
-          'Smart',
-          'Suspicious',
-        ],
-        availableUpgrades: [
-          {
-            id: 'opt1',
-            name: 'Twinoid',
-            type: 'Active',
-            color: 'Yellow',
-            description: 'Fires twice per reload cycle. Strong synergy with Comanche Auto.',
-          },
-          {
-            id: 'opt2',
-            name: 'Sniper Rifle',
-            type: 'Weapon',
-            color: 'Red',
-            description: 'Warning: Exceeds 2-weapon rule and increases Saboteur disarm risk.',
-          },
-        ],
-        aiRecommendation: {
-          recommendedOptionId: 'opt1',
-          recommendedSkill: 'Twinoid',
-          reasons: [
-            'Individual Build: Matches Armor-Piercing Mid-Range Bruiser archetype.',
-            'Rule Check: Avoids adding an extra firearm (prevents AI weapon-swap loops).',
-            'Raid Synergy: Boosts sustained wave DPS for Recruiter Raid Phase 4.',
-          ],
-        },
-      },
+if (!fs.existsSync(RAW_HTML_DIR)) {
+  fs.mkdirSync(RAW_HTML_DIR, { recursive: true });
+}
+
+function buildEnrichedAccounts() {
+  const { accountsList } = parseSecretCfg();
+  const rawAccounts = accountsList.map((acc) => parseSavedAccountHtml(acc));
+  const collectiveMetrics = evaluateCollectiveRaidPool(rawAccounts);
+
+  return rawAccounts.map((acc) => {
+    const arch = detectSoldierArchetype(acc.firstSoldier);
+    acc.firstSoldier.archetype = arch.name;
+    acc.firstSoldier.aiRecommendation = recommendBestUpgrade(
+      acc.firstSoldier,
+      collectiveMetrics
+    );
+    acc.collectivePool = collectiveMetrics;
+    return acc;
+  });
+}
+
+// GET /api/accounts - Immediately parses existing HTML files in data/raw_html/
+// Only runs run_accounts.sh if ?refresh=true is explicitly requested
+app.get('/api/accounts', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true';
+
+    if (forceRefresh) {
+      console.log('Running run_accounts.sh --sync-only...');
+      await runAllAccountsScript(true);
     }
-    // ... other accounts (berbelita2 to 7) can be added here or parsed dynamically
-  ];
 
-  res.json(accountsData);
+    const enriched = buildEnrichedAccounts();
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(enriched, null, 2));
+    console.log(`Served ${enriched.length} accounts to frontend.`);
+    res.json(enriched);
+  } catch (error) {
+    console.error('Error in GET /api/accounts:', error.message);
+    res.status(500).json({ error: error.message });
+  }
 });
 
-const PORT = process.0 || 3000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Mini Troopers Backend running on http://localhost:${PORT}`);
 });

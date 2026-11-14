@@ -1,0 +1,6 @@
+/scripts/secret.cfg
+logs
+*.log
+node_modules
+dist
+data/
